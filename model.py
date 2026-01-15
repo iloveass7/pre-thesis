@@ -1,12 +1,10 @@
+# model_path_predictor.py
 import torch
+import numpy as np  
 import torch.nn as nn
 import torch.nn.functional as F
 
 class ResidualBlock(nn.Module):
-    """
-    Implementation of the Residual Block shown in Figure 5[cite: 187].
-    Structure: Conv -> ReLU -> Conv -> Sum(Input) -> ReLU
-    """
     def __init__(self, in_channels, out_channels):
         super(ResidualBlock, self).__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
@@ -18,120 +16,181 @@ class ResidualBlock(nn.Module):
         residual = x
         out = F.relu(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
-        out += residual # The "Skip Connection"
+        out += residual
         out = F.relu(out)
         return out
 
-class DBCNN(nn.Module):
+class PathPredictorDB_CNN(nn.Module):
+    """
+    Enhanced DB-CNN that predicts VALUE MAP for entire path planning
+    instead of just the next move
+    """
     def __init__(self):
-        super(DBCNN, self).__init__()
+        super(PathPredictorDB_CNN, self).__init__()
         
-        # --- INPUT DEFINITION ---
-        # We use 3 channels: 
-        # 1. The Mars Map (Gray)
-        # 2. The Target Position (One-hot map)
-        # 3. The Rover Position (One-hot map)
-        input_channels = 3 
+        input_channels = 3  # map, start, target
+        
+        # --- SHARED FEATURE EXTRACTOR ---
+        self.shared_features = nn.Sequential(
+            nn.Conv2d(input_channels, 16, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+        )
+        
+        # --- BRANCH 1: GLOBAL CONTEXT (Value Map) ---
+        self.global_branch = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            ResidualBlock(64, 64),
+            nn.Conv2d(64, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+        )
+        
+        # --- BRANCH 2: LOCAL GUIDANCE ---
+        self.local_branch = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            ResidualBlock(64, 64),
+            nn.Conv2d(64, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+        )
+        
+        # --- FUSION AND VALUE MAP PREDICTION ---
+        self.fusion = nn.Sequential(
+            nn.Conv2d(64, 32, kernel_size=3, padding=1),  # 32+32=64 channels
+            nn.ReLU(),
+            nn.Conv2d(32, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+        )
+        
+        # Upsample back to original size
+        self.upsample = nn.Sequential(
+            nn.Upsample(scale_factor=4, mode='bilinear', align_corners=True),
+            nn.Conv2d(16, 8, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(8, 1, kernel_size=3, padding=1),  # Single channel value map
+        )
+        
+        # --- PATH DECODER (Optional: Predict waypoints) ---
+        self.path_decoder = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(128, 256),
+            nn.ReLU(),
+            nn.Linear(256, 50 * 2),  # Predict 50 waypoints (x,y)
+        )
+    
+    def forward(self, x, predict_path=False):
+        """
+        Args:
+            x: [B, 3, 128, 128] - map, start, target channels
+            predict_path: If True, also predict waypoints
+        Returns:
+            value_map: [B, 1, 128, 128] - Value function for all positions
+            waypoints: [B, 50, 2] - Optional predicted waypoints
+        """
+        # Extract shared features
+        features = self.shared_features(x)  # [B, 32, 32, 32]
+        
+        # Global context
+        global_feat = self.global_branch(features)  # [B, 32, 32, 32]
+        
+        # Local features
+        local_feat = self.local_branch(features)  # [B, 32, 32, 32]
+        
+        # Fuse features
+        fused = torch.cat([global_feat, local_feat], dim=1)  # [B, 64, 32, 32]
+        fused = self.fusion(fused)  # [B, 16, 32, 32]
+        
+        # Predict value map (heatmap of good positions)
+        value_map = self.upsample(fused)  # [B, 1, 128, 128]
+        
+        if predict_path:
+            # Predict waypoints
+            waypoints = self.path_decoder(fused)  # [B, 100]
+            waypoints = waypoints.view(-1, 50, 2)  # [B, 50, 2]
+            return value_map, waypoints
+        
+        return value_map
 
-        # --- REPROCESSING LAYERS (Shared) [cite: 139, 190] ---
-        # Conv-00: 6 filters, 5x5, stride 1
-        self.conv00 = nn.Conv2d(input_channels, 6, kernel_size=5, padding=2)
-        # Pool-00: 3x3, stride 2
-        self.pool00 = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+class NonLinearPathPlanner(nn.Module):
+    """
+    Wrapper model that uses value map to plan non-linear paths
+    """
+    def __init__(self):
+        super(NonLinearPathPlanner, self).__init__()
+        self.db_cnn = PathPredictorDB_CNN()
         
-        # Conv-01: 12 filters, 4x4, stride 1
-        self.conv01 = nn.Conv2d(6, 12, kernel_size=4, padding=1) # padding adjusted for 4x4
-        # Pool-01: 3x3, stride 2
-        self.pool01 = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        # LSTM for sequential path generation
+        self.lstm = nn.LSTM(input_size=128*128, hidden_size=256, num_layers=2, batch_first=True)
+        self.position_decoder = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 2)  # Predict next (row, col)
+        )
+    
+    def plan_path(self, value_map, start_pos, max_steps=100):
+        """
+        Use value map to plan a complete path
+        """
+        batch_size = value_map.size(0)
+        paths = []
         
-        # After these layers, a 128x128 image becomes approx 32x32
-
-        # --- BRANCH ONE (Global) [cite: 170, 190] ---
-        # Conv-10: 20 filters, 5x5
-        self.b1_conv10 = nn.Conv2d(12, 20, kernel_size=5, padding=2)
-        self.b1_pool10 = nn.MaxPool2d(3, stride=2, padding=1)
+        for b in range(batch_size):
+            path = [start_pos[b].cpu().numpy()]
+            current = start_pos[b].cpu().numpy()
+            
+            value_grid = value_map[b, 0].cpu().numpy()  # [128, 128]
+            
+            # Normalize value grid
+            value_grid = (value_grid - value_grid.min()) / (value_grid.max() - value_grid.min() + 1e-8)
+            
+            for step in range(max_steps):
+                # Get current position value
+                r, c = int(current[0]), int(current[1])
+                
+                # Look at neighbors
+                best_move = None
+                best_value = -float('inf')
+                
+                # Check 8 directions
+                for dr in [-1, 0, 1]:
+                    for dc in [-1, 0, 1]:
+                        if dr == 0 and dc == 0:
+                            continue
+                            
+                        nr, nc = r + dr, c + dc
+                        if 0 <= nr < 128 and 0 <= nc < 128:
+                            neighbor_value = value_grid[nr, nc]
+                            
+                            # Penalize moving away from target direction
+                            # (Simple heuristic - can be improved)
+                            if neighbor_value > best_value:
+                                best_value = neighbor_value
+                                best_move = (dr, dc)
+                
+                if best_move is None:
+                    break
+                    
+                # Move with some randomness for non-linearity
+                if np.random.random() < 0.1:  # 10% chance to take suboptimal move
+                    moves = [(-1,0), (1,0), (0,-1), (0,1), (-1,-1), (-1,1), (1,-1), (1,1)]
+                    best_move = moves[np.random.randint(len(moves))]
+                
+                new_pos = (r + best_move[0], c + best_move[1])
+                path.append(new_pos)
+                current = new_pos
+                
+                # Check if we've reached high-value region
+                if value_grid[new_pos[0], new_pos[1]] > 0.8:
+                    break
+            
+            paths.append(np.array(path))
         
-        # Res-11
-        self.b1_res11 = ResidualBlock(20, 20)
-        self.b1_pool11 = nn.MaxPool2d(3, stride=2, padding=1)
-        
-        # Res-12
-        self.b1_res12 = ResidualBlock(20, 20)
-        self.b1_pool12 = nn.MaxPool2d(3, stride=1, padding=1) # Stride 1 per table
-        
-        # Res-13
-        self.b1_res13 = ResidualBlock(20, 20)
-        self.b1_pool13 = nn.MaxPool2d(3, stride=1, padding=1)
-
-        # Fully Connected Layers for Branch 1
-        # Calculation: 32x32 -> pool(2) -> 16 -> pool(2) -> 8 -> pool(1) -> 8 -> pool(1) -> 8
-        # Final map size is roughly 8x8 with 20 channels = 1280 inputs
-        self.b1_fc1 = nn.Linear(20 * 8 * 8, 192)
-        self.b1_fc2 = nn.Linear(192, 10)
-
-        # --- BRANCH TWO (Local) [cite: 174, 190] ---
-        # Conv-20: 20 filters, 5x5
-        self.b2_conv20 = nn.Conv2d(12, 20, kernel_size=5, padding=2)
-        
-        # 4 Residual Blocks in a row
-        self.b2_res21 = ResidualBlock(20, 20)
-        self.b2_res22 = ResidualBlock(20, 20)
-        self.b2_res23 = ResidualBlock(20, 20)
-        self.b2_res24 = ResidualBlock(20, 20)
-        
-        # Conv-21: 10 filters, 3x3
-        self.b2_conv21 = nn.Conv2d(20, 10, kernel_size=3, padding=1)
-        
-        # Branch 2 Output Flattening
-        # Map size here is still approx 32x32 (no pooling in Branch 2)
-        # 10 channels * 32 * 32 = 10240
-        self.b2_fc3_input_size = 10 * 32 * 32 
-
-        # --- FUSION & OUTPUT [cite: 156, 190] ---
-        # Takes output of B1 (10) + Output of B2 (10240)
-        # Note: In the paper, they likely crop B2 at the rover location, 
-        # but flattening is a safer/easier implementation for a thesis baseline.
-        self.fc3 = nn.Linear(10 + self.b2_fc3_input_size, 8) 
-
-    def forward(self, x):
-        # x shape: [Batch, 3, 128, 128]
-        
-        # --- Shared Reprocessing ---
-        x = F.relu(self.conv00(x))
-        x = self.pool00(x)
-        x = F.relu(self.conv01(x))
-        x = self.pool01(x)
-        # x is now the "Deep Feature Map" (approx 32x32)
-
-        # --- Branch 1 (Global) ---
-        out1 = F.relu(self.b1_conv10(x))
-        out1 = self.b1_pool10(out1)
-        out1 = self.b1_res11(out1)
-        out1 = self.b1_pool11(out1)
-        out1 = self.b1_res12(out1)
-        out1 = self.b1_pool12(out1)
-        out1 = self.b1_res13(out1)
-        out1 = self.b1_pool13(out1)
-        
-        out1 = out1.view(out1.size(0), -1) # Flatten
-        out1 = F.relu(self.b1_fc1(out1))
-        out1 = F.relu(self.b1_fc2(out1)) # Vector of size 10
-
-        # --- Branch 2 (Local) ---
-        out2 = F.relu(self.b2_conv20(x))
-        out2 = self.b2_res21(out2)
-        out2 = self.b2_res22(out2)
-        out2 = self.b2_res23(out2)
-        out2 = self.b2_res24(out2)
-        out2 = F.relu(self.b2_conv21(out2))
-        
-        out2 = out2.view(out2.size(0), -1) # Flatten
-
-        # --- Fusion ---
-        # Combine the Global info (out1) and Local info (out2)
-        combined = torch.cat((out1, out2), dim=1)
-        
-        # Final prediction (8 directions)
-        prediction = self.fc3(combined)
-        #print(prediction.shape)
-        return prediction # Returns raw scores (logits), use CrossEntropyLoss later
+        return paths
