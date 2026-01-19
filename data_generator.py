@@ -10,7 +10,7 @@ from pathlib import Path
 PATCH_SIZE = 128
 NUM_SAMPLES_PER_IMAGE = 50  # Reduced for quality
 OUTPUT_DIR = "dataset_curved"  # New folder for curved paths
-RAW_IMAGES_DIR = r"D:\DS\pre-thesis\hirise-map-proj-v3\thesis_imge"
+RAW_IMAGES_DIR = r"C:\Users\Mahadir\pre-thesis\dataset_v3\images"
 
 class CurvedPathGenerator:
     def __init__(self, patch_size=128):

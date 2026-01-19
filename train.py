@@ -88,7 +88,7 @@ def train_path_predictor():
     criterion = nn.MSELoss()  # Mean squared error for value map
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     
-    for epoch in range(20):
+    for epoch in range(100):
         total_loss = 0
         model.train()
         

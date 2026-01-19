@@ -1,0 +1,313 @@
+Path Prediction Evaluation Metrics
+==================================================
+
+Number of samples evaluated: 50
+
+Precision: 0.2583
+Recall: 0.3692
+F1: 0.2970
+Accuracy: 0.9784
+Avg_distance: 4.3932
+Length_ratio: 3.3178
+
+Detailed Metrics:
+
+Sample 1:
+  precision: 0.2776
+  recall: 0.5131
+  f1: 0.3603
+  accuracy: 0.9788
+
+Sample 2:
+  precision: 0.2140
+  recall: 0.3459
+  f1: 0.2644
+  accuracy: 0.9813
+
+Sample 3:
+  precision: 0.1440
+  recall: 0.3503
+  f1: 0.2041
+  accuracy: 0.9738
+
+Sample 4:
+  precision: 0.3481
+  recall: 0.6755
+  f1: 0.4595
+  accuracy: 0.9854
+
+Sample 5:
+  precision: 0.1383
+  recall: 0.1752
+  f1: 0.1546
+  accuracy: 0.9680
+
+Sample 6:
+  precision: 0.4409
+  recall: 0.7582
+  f1: 0.5576
+  accuracy: 0.9866
+
+Sample 7:
+  precision: 0.6330
+  recall: 0.7841
+  f1: 0.7005
+  accuracy: 0.9928
+
+Sample 8:
+  precision: 0.2742
+  recall: 0.4184
+  f1: 0.3313
+  accuracy: 0.9798
+
+Sample 9:
+  precision: 0.3097
+  recall: 0.1336
+  f1: 0.1867
+  accuracy: 0.9814
+
+Sample 10:
+  precision: 0.3758
+  recall: 0.4844
+  f1: 0.4232
+  accuracy: 0.9794
+
+Sample 11:
+  precision: 0.3696
+  recall: 0.3810
+  f1: 0.3752
+  accuracy: 0.9772
+
+Sample 12:
+  precision: 0.5171
+  recall: 0.5552
+  f1: 0.5355
+  accuracy: 0.9808
+
+Sample 13:
+  precision: 0.4753
+  recall: 0.7102
+  f1: 0.5695
+  accuracy: 0.9885
+
+Sample 14:
+  precision: 0.0665
+  recall: 0.0982
+  f1: 0.0793
+  accuracy: 0.9688
+
+Sample 15:
+  precision: 0.3312
+  recall: 0.4339
+  f1: 0.3757
+  accuracy: 0.9787
+
+Sample 16:
+  precision: 0.2643
+  recall: 0.4632
+  f1: 0.3365
+  accuracy: 0.9788
+
+Sample 17:
+  precision: 0.1381
+  recall: 0.1761
+  f1: 0.1548
+  accuracy: 0.9833
+
+Sample 18:
+  precision: 0.1124
+  recall: 0.1014
+  f1: 0.1067
+  accuracy: 0.9714
+
+Sample 19:
+  precision: 0.1259
+  recall: 0.1925
+  f1: 0.1522
+  accuracy: 0.9755
+
+Sample 20:
+  precision: 0.0475
+  recall: 0.0729
+  f1: 0.0575
+  accuracy: 0.9640
+
+Sample 21:
+  precision: 0.1686
+  recall: 0.3135
+  f1: 0.2193
+  accuracy: 0.9748
+
+Sample 22:
+  precision: 0.0577
+  recall: 0.1216
+  f1: 0.0783
+  accuracy: 0.9741
+
+Sample 23:
+  precision: 0.2426
+  recall: 0.2678
+  f1: 0.2545
+  accuracy: 0.9825
+
+Sample 24:
+  precision: 0.2955
+  recall: 0.5824
+  f1: 0.3921
+  accuracy: 0.9813
+
+Sample 25:
+  precision: 0.2677
+  recall: 0.3187
+  f1: 0.2910
+  accuracy: 0.9741
+
+Sample 26:
+  precision: 0.3302
+  recall: 0.6731
+  f1: 0.4430
+  accuracy: 0.9839
+
+Sample 27:
+  precision: 0.3249
+  recall: 0.3946
+  f1: 0.3564
+  accuracy: 0.9773
+
+Sample 28:
+  precision: 0.3892
+  recall: 0.8616
+  f1: 0.5362
+  accuracy: 0.9855
+
+Sample 29:
+  precision: 0.1682
+  recall: 0.2288
+  f1: 0.1939
+  accuracy: 0.9726
+
+Sample 30:
+  precision: 0.1921
+  recall: 0.2480
+  f1: 0.2165
+  accuracy: 0.9722
+
+Sample 31:
+  precision: 0.1204
+  recall: 0.2308
+  f1: 0.1582
+  accuracy: 0.9747
+
+Sample 32:
+  precision: 0.0579
+  recall: 0.1010
+  f1: 0.0736
+  accuracy: 0.9677
+
+Sample 33:
+  precision: 0.2870
+  recall: 0.4844
+  f1: 0.3605
+  accuracy: 0.9799
+
+Sample 34:
+  precision: 0.1784
+  recall: 0.2892
+  f1: 0.2207
+  accuracy: 0.9793
+
+Sample 35:
+  precision: 0.2174
+  recall: 0.1031
+  f1: 0.1399
+  accuracy: 0.9850
+
+Sample 36:
+  precision: 0.2290
+  recall: 0.3036
+  f1: 0.2610
+  accuracy: 0.9765
+
+Sample 37:
+  precision: 0.0437
+  recall: 0.0654
+  f1: 0.0524
+  accuracy: 0.9691
+
+Sample 38:
+  precision: 0.0145
+  recall: 0.0240
+  f1: 0.0181
+  accuracy: 0.9669
+
+Sample 39:
+  precision: 0.4026
+  recall: 0.4649
+  f1: 0.4315
+  accuracy: 0.9797
+
+Sample 40:
+  precision: 0.2118
+  recall: 0.1132
+  f1: 0.1475
+  accuracy: 0.9873
+
+Sample 41:
+  precision: 0.5175
+  recall: 0.5160
+  f1: 0.5168
+  accuracy: 0.9798
+
+Sample 42:
+  precision: 0.3156
+  recall: 0.4128
+  f1: 0.3577
+  accuracy: 0.9844
+
+Sample 43:
+  precision: 0.3414
+  recall: 0.5799
+  f1: 0.4298
+  accuracy: 0.9794
+
+Sample 44:
+  precision: 0.3240
+  recall: 0.3580
+  f1: 0.3402
+  accuracy: 0.9863
+
+Sample 45:
+  precision: 0.3272
+  recall: 0.4569
+  f1: 0.3813
+  accuracy: 0.9790
+
+Sample 46:
+  precision: 0.1058
+  recall: 0.1442
+  f1: 0.1220
+  accuracy: 0.9728
+
+Sample 47:
+  precision: 0.3733
+  recall: 0.7320
+  f1: 0.4945
+  accuracy: 0.9860
+
+Sample 48:
+  precision: 0.2254
+  recall: 0.3828
+  f1: 0.2837
+  accuracy: 0.9753
+
+Sample 49:
+  precision: 0.2829
+  recall: 0.4343
+  f1: 0.3426
+  accuracy: 0.9799
+
+Sample 50:
+  precision: 0.2997
+  recall: 0.4279
+  f1: 0.3525
+  accuracy: 0.9800

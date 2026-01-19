@@ -1,0 +1,22 @@
+{
+    "summary": {
+        "num_samples_evaluated": 100,
+        "avg_precision": 0.2384940166866988,
+        "avg_recall": 0.3540059937717205,
+        "avg_f1": 0.2780566135046456,
+        "avg_accuracy": 0.9776885986328125,
+        "avg_distance": 4.701636110178775,
+        "avg_length_ratio": 3.4761649276870226,
+        "success_rate": 0.2
+    },
+    "sample_details": [
+        {
+            "file_id": "0",
+            "metrics": {
+                "precision": 0.2776203966005666,
+                "recall": 0.5130890052356021,
+                "f1": 0.3602941176470588,
+                "accuracy": 0.978759765625,
+                "avg_distance": 2.8752696083982197,
+                "length_ratio": 3.0185185185185186,
+                "success": 
