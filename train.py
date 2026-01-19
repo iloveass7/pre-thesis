@@ -9,7 +9,7 @@ from torch.utils.data import Dataset, DataLoader
 from model import DBCNN
 
 # --- CONFIGURATION ---
-DATASET_DIR = "dataset_v3"
+DATASET_DIR = "dataset_v4"
 BATCH_SIZE = 64  # Increased batch size for stable gradients
 LEARNING_RATE = 0.001
 EPOCHS = 100      # Fewer epochs needed with augmentation

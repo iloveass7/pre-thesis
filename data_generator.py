@@ -7,9 +7,9 @@ from pathlib import Path
 
 # --- CONFIGURATION ---
 PATCH_SIZE = 128
-NUM_SAMPLES_PER_IMAGE = 100
-OUTPUT_DIR = "dataset_v3"  # New folder
-RAW_IMAGES_DIR = r"D:\Thesis\hirise-map-proj-v3\map-proj-v3" # Verify this path!
+NUM_SAMPLES_PER_IMAGE = 200
+OUTPUT_DIR = "dataset_v4"
+RAW_IMAGES_DIR = "hirise-map-proj-v3/map-proj-v3"
 
 MOVES = {
     (0, 1): 0, (1, 0): 1, (0, -1): 2, (-1, 0): 3,
@@ -173,23 +173,36 @@ def process_patch(patch_img, patch_id, save_dir):
     np.savez(save_path_meta, path=np.array(path), target=np.array(end), start=np.array(start))
     return True
 def main():
-    # Create directories
-    Path(os.path.join(OUTPUT_DIR, 'images')).mkdir(parents=True, exist_ok=True)
-    Path(os.path.join(OUTPUT_DIR, 'meta')).mkdir(parents=True, exist_ok=True)
-    Path(os.path.join(OUTPUT_DIR, 'debug')).mkdir(parents=True, exist_ok=True)
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate dataset from HiRISE images.")
+    parser.add_argument("--raw_dir", type=str, 
+                        default=os.getenv("RAW_IMAGES_DIR", RAW_IMAGES_DIR),
+                        help="Directory containing raw HiRISE images")
+    parser.add_argument("--output_dir", type=str, 
+                        default=os.getenv("OUTPUT_DIR", OUTPUT_DIR),
+                        help="Directory to save generated dataset")
+    args = parser.parse_args()
 
-    print(f"Searching in: {RAW_IMAGES_DIR}")
+    raw_images_dir = args.raw_dir
+    output_dir = args.output_dir
+
+    # Create directories
+    Path(os.path.join(output_dir, 'images')).mkdir(parents=True, exist_ok=True)
+    Path(os.path.join(output_dir, 'meta')).mkdir(parents=True, exist_ok=True)
+    Path(os.path.join(output_dir, 'debug')).mkdir(parents=True, exist_ok=True)
+
+    print(f"Searching in: {raw_images_dir}")
     image_files = []
-    for root, _, files in os.walk(RAW_IMAGES_DIR):
+    for root, _, files in os.walk(raw_images_dir):
         for file in files:
             if file.lower().endswith(('.jpg', '.png', '.tif')):
                 image_files.append(os.path.join(root, file))
 
     if not image_files:
-        print("ERROR: No images found! Check path.")
+        print(f"ERROR: No images found in {raw_images_dir}! Check path.")
         return
 
-    print(f"Found {len(image_files)} images. Generating dataset_v3...")
+    print(f"Found {len(image_files)} images. Generating {output_dir}...")
     
     global_counter = 0
     for img_path in image_files:
@@ -206,12 +219,12 @@ def main():
                 patch = full_img[r:r+PATCH_SIZE, c:c+PATCH_SIZE]
                 if np.mean(patch) < 5: continue
                 
-                if process_patch(patch, global_counter, OUTPUT_DIR):
+                if process_patch(patch, global_counter, output_dir):
                     global_counter += 1
                     success_count += 1
                     print(f"Generated {global_counter} samples...", end='\r')
 
-    print(f"\nDone! Check '{OUTPUT_DIR}/debug' to see the obstacle maps.")
+    print(f"\nDone! Check '{output_dir}/debug' to see the obstacle maps.")
 
 if __name__ == "__main__":
     main()
