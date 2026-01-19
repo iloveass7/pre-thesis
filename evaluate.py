@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import os
 import glob
+import heapq
 from model import DBCNN
 
 # --- CONFIG ---
@@ -47,6 +48,46 @@ def get_obstacle_map(image):
     
     return combined
 
+def astar(obstacle_map, start, target):
+    """A* pathfinding algorithm."""
+    open_list = []
+    # (f_cost, position)
+    h_cost = np.linalg.norm(np.array(start) - np.array(target))
+    heapq.heappush(open_list, (h_cost, start))
+    
+    came_from = {start: None}
+    g_score = {start: 0}
+
+    while open_list:
+        _, current_pos = heapq.heappop(open_list)
+
+        if np.linalg.norm(np.array(current_pos) - np.array(target)) < 1.5: # Close enough
+            path = []
+            while current_pos is not None:
+                path.append(current_pos)
+                current_pos = came_from.get(current_pos)
+            return path[::-1]
+
+        for action_idx, delta in MOVES.items():
+            neighbor_pos = (current_pos[0] + delta[0], current_pos[1] + delta[1])
+
+            if not (0 <= neighbor_pos[0] < 128 and 0 <= neighbor_pos[1] < 128):
+                continue
+            if obstacle_map[neighbor_pos[0], neighbor_pos[1]] > 0:
+                continue
+
+            move_cost = 1 if action_idx < 4 else np.sqrt(2)
+            tentative_g_score = g_score.get(current_pos, float('inf')) + move_cost
+
+            if tentative_g_score < g_score.get(neighbor_pos, float('inf')):
+                came_from[neighbor_pos] = current_pos
+                g_score[neighbor_pos] = tentative_g_score
+                h_cost = np.linalg.norm(np.array(neighbor_pos) - np.array(target))
+                f_cost = tentative_g_score + h_cost
+                heapq.heappush(open_list, (f_cost, neighbor_pos))
+
+    return None # No path found
+
 def predict_move(model, image, current_pos, target_pos, obstacle_map, dist_map, history=None, stuck_mode=False):
     # Channel Preparation
     c0 = image.astype(np.float32) / 255.0
@@ -60,47 +101,47 @@ def predict_move(model, image, current_pos, target_pos, obstacle_map, dist_map, 
         output = model(state_tensor)
         logits = output.squeeze(0).cpu().numpy()
         
-    # Standardize Model Guidance
-    logits = (logits - np.mean(logits)) / (np.std(logits) + 1e-6)
+    # Standardize model output, but don't over-amplify it.
+    scores = (logits - np.mean(logits)) / (np.std(logits) + 1e-6)
     
-    scores = logits.copy()
+    if stuck_mode:
+        # Stuck mode: The main goal is to find a new path. We heavily prioritize
+        # moving into open space, while maintaining a slight pull to the target.
+        dist_weight = 1.0
+        safety_weight = 2.5
+        oscillation_penalty = 25.0
+    else:
+        # Normal mode: A robust balance with a strong pull to the target to ensure convergence.
+        dist_weight = 3.5
+        safety_weight = 0.6
+        oscillation_penalty = 15.0
+
     current_dist = np.linalg.norm(np.array(current_pos) - np.array(target_pos))
     
     for action_idx, delta in MOVES.items():
         next_p = (current_pos[0] + delta[0], current_pos[1] + delta[1])
         
-        # 1. Collision & Boundary Hard Filter
+        # 1. Hard Filters
         if not (0 <= next_p[0] < 128 and 0 <= next_p[1] < 128):
             scores[action_idx] = -1000; continue
         if obstacle_map[next_p[0], next_p[1]] > 0:
             scores[action_idx] = -1000; continue
             
-        # 2. Shortest Path Cost (Prefer closing distance)
+        # 2. Shortest Path Cost (Progress towards target)
         next_dist = np.linalg.norm(np.array(next_p) - np.array(target_pos))
         delta_dist = current_dist - next_dist
-        # High weight on progress to target
-        scores[action_idx] += delta_dist * 5.0 
+        scores[action_idx] += delta_dist * dist_weight
         
-        # 3. Easy Path Cost (Safety/Smoothness)
-        # Stay clear of obstacles. Max reward is ~3.0 for being 10px+ away.
+        # 3. Easy Path Cost (Obstacle avoidance)
+        # A moderate reward for staying in open areas.
         safety = dist_map[next_p[0], next_p[1]]
-        scores[action_idx] += min(safety, 5.0) * 0.4 
-        
-        # 4. Diagonal Cost (Prefer straight lines if distance gain is same)
-        is_diagonal = abs(delta[0]) + abs(delta[1]) == 2
-        if is_diagonal:
-            scores[action_idx] -= 0.1
+        scores[action_idx] += min(safety, 8.0) * safety_weight
             
-        # 5. Anti-Oscillation Penalty
+        # 4. Anti-Oscillation Penalty
         if history is not None:
-            # Check last 30 steps for loops
-            visits = history[-30:].count(next_p)
+            visits = history[-50:].count(next_p)
             if visits > 0:
-                scores[action_idx] -= visits * 10.0
-        
-        # 6. Stuck Mode: Extra push to target
-        if stuck_mode:
-            scores[action_idx] += delta_dist * 15.0
+                scores[action_idx] -= visits * oscillation_penalty
 
     return np.argmax(scores)
 
@@ -117,6 +158,9 @@ def run_simulation():
     if not image_files: return
 
     print(f"Goal: 'Shortest & Easiest' Path via Efficiency-Weighted Planning...")
+    
+    total_path_optimality = 0
+    total_successful_sims = 0
 
     for i in range(min(25, len(image_files))):
         img_path = image_files[i]
@@ -140,22 +184,28 @@ def run_simulation():
         for _ in range(100):
             if np.linalg.norm(np.array(start)-np.array(target)) > 80: break
             target = tuple(valid_coords[np.random.choice(len(valid_coords))])
+
+        # --- A* Pathfinding ---
+        astar_path = astar(obs_map, start, target)
+        if astar_path is None:
+            print(f"Sim {i:2d}: SKIPPED - A* could not find a path.")
+            continue
             
         current = start; path = [current]
         dist_direct = np.linalg.norm(np.array(start)-np.array(target))
         
         color_map = cv2.cvtColor(raw_img, cv2.COLOR_GRAY2BGR)
-        # We no longer tint the results; drawing directly on the gray image as requested.
-        cv2.circle(color_map, (start[1], start[0]), 3, (0, 255, 0), -1)
-        cv2.circle(color_map, (target[1], target[0]), 3, (255, 0, 0), -1)
+        cv2.circle(color_map, (start[1], start[0]), 3, (0, 255, 0), -1) # Start: Green
+        cv2.circle(color_map, (target[1], target[0]), 3, (255, 0, 0), -1) # Target: Blue
 
         success = False; collision = False; stuck_mode = False
         
         for step in range(1000):
-            # Dynamic Stuck Detection
-            if len(path) > 10:
-                prog = np.linalg.norm(np.array(path[-10])-np.array(target)) - np.linalg.norm(np.array(current)-np.array(target))
-                stuck_mode = prog < 1.0 
+            # Dynamic Stuck Detection: If we haven't made at least 2px of progress
+            # towards the target in the last 15 steps, activate stuck mode to explore.
+            if len(path) > 15:
+                progress = np.linalg.norm(np.array(path[-15]) - np.array(target)) - np.linalg.norm(np.array(current) - np.array(target))
+                stuck_mode = progress < 2.0 
             
             action = predict_move(model, raw_img, current, target, obs_map, dist_map, path, stuck_mode)
             delta = MOVES[action]
@@ -169,16 +219,34 @@ def run_simulation():
             if np.linalg.norm(np.array(current) - np.array(target)) < 5:
                 success = True; break
 
-        # Drawing the path
+        # Drawing paths
+        # A* path (Ground Truth): Yellow
+        if astar_path:
+            for j in range(len(astar_path) - 1):
+                cv2.line(color_map, (astar_path[j][1], astar_path[j][0]), (astar_path[j+1][1], astar_path[j+1][0]), (0, 255, 255), 1)
+        # Model's path: Red
         for j in range(len(path) - 1):
             cv2.line(color_map, (path[j][1], path[j][0]), (path[j+1][1], path[j+1][0]), (0, 0, 255), 1)
 
-        # Calculate Efficiency (Shortest Path Efficiency)
+        # Calculate Metrics
         eff = dist_direct / len(path) if len(path) > 0 else 0
+        path_optimality = len(astar_path) / len(path) if success and len(path) > 0 and astar_path is not None else 0.0
+        if success:
+            total_path_optimality += path_optimality
+            total_successful_sims += 1
+
         status = "SUCCESS" if success else ("COLLISION" if collision else "TIMEOUT")
         save_path = os.path.join(OUTPUT_DIR, f"result_{i}_{status}.png")
         cv2.imwrite(save_path, color_map)
-        print(f"Sim {i:2d}: {status:9s} | Eff: {eff:4.2f} | Dist: {dist_direct:5.1f} | Steps: {len(path):4d} {'[STUCK_REC]' if stuck_mode else ''}")
+        
+        astar_steps = len(astar_path) if astar_path is not None else 0
+        print(f"Sim {i:2d}: {status:9s} | Eff: {eff:4.2f} | Steps: {len(path):4d} | A* Steps: {astar_steps:4d} | Optimality: {path_optimality:4.2f} {'[STUCK_REC]' if stuck_mode else ''}")
+
+    if total_successful_sims > 0:
+        avg_optimality = total_path_optimality / total_successful_sims
+        print("\n--- Evaluation Summary ---")
+        print(f"Average Path Optimality (vs A*): {avg_optimality:.3f} ({total_successful_sims} successful sims)")
+        print("--------------------------")
 
 if __name__ == "__main__":
     run_simulation()

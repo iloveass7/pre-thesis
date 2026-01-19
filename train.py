@@ -12,7 +12,7 @@ from model import DBCNN
 DATASET_DIR = "dataset_v4"
 BATCH_SIZE = 64  # Increased batch size for stable gradients
 LEARNING_RATE = 0.001
-EPOCHS = 70      # Fewer epochs needed with augmentation
+EPOCHS = 100      # Fewer epochs needed with augmentation
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Move mapping

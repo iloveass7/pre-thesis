@@ -7,7 +7,7 @@ from pathlib import Path
 
 # --- CONFIGURATION ---
 PATCH_SIZE = 128
-NUM_SAMPLES_PER_IMAGE = 150
+NUM_SAMPLES_PER_IMAGE = 200
 OUTPUT_DIR = "dataset_v4"
 RAW_IMAGES_DIR = "hirise-map-proj-v3/map-proj-v3"
 
