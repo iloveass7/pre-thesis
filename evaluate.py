@@ -1,445 +1,307 @@
-# evaluate_path_predictor.py
+# evaluate_simple.py
 import torch
-import cv2
 import numpy as np
 import os
 import glob
-import matplotlib.pyplot as plt
-from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
-import json
+import cv2
 from model import PathPredictorDB_CNN
 
-# --- CONFIG ---
 MODEL_PATH = "path_predictor_epoch_100.pth"
 DATA_DIR = "dataset_curved"
-OUTPUT_DIR = "evaluation_results"
+OUTPUT_DIR = "successful_samples"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def create_input_tensor(image, start_pos, target_pos):
-    """Create 3-channel input tensor matching training format"""
-    # Channel 0: Map
-    c0 = image.astype(np.float32) / 255.0
+def smart_extract_path(value_map, start_pos, target_pos):
+    """SMART path extraction that won't get stuck"""
+    value_norm = (value_map - value_map.min()) / (value_map.max() - value_map.min() + 1e-8)
     
-    # Channel 1: Target position (with blob)
-    c1 = np.zeros_like(c0)
-    draw_blob(c1, target_pos[0], target_pos[1])
-    
-    # Channel 2: Start/Rover position (with blob)
-    c2 = np.zeros_like(c0)
-    draw_blob(c2, start_pos[0], start_pos[1])
-    
-    # Stack channels
-    input_tensor = np.stack([c0, c1, c2], axis=0)
-    return torch.tensor(input_tensor, dtype=torch.float32).unsqueeze(0).to(DEVICE)
-
-def draw_blob(canvas, r, c, size=3):
-    """Draw a blob at position (r,c)"""
-    h, w = canvas.shape
-    r_min, r_max = max(0, r-size), min(h, r+size+1)
-    c_min, c_max = max(0, c-size), min(w, c+size+1)
-    canvas[r_min:r_max, c_min:c_max] = 1.0
-
-def extract_ground_truth_path(meta_path):
-    """Extract ground truth path from npz file"""
-    data = np.load(meta_path)
-    path = data['path']
-    target = data['target']
-    start = data['start']
-    return path, start, target
-
-def create_path_mask(path, size=128, thickness=2):
-    """Create binary mask of the path"""
-    mask = np.zeros((size, size), dtype=np.uint8)
-    for i in range(len(path) - 1):
-        pt1 = (int(path[i][1]), int(path[i][0]))
-        pt2 = (int(path[i+1][1]), int(path[i+1][0]))
-        cv2.line(mask, pt1, pt2, 255, thickness)
-    return mask
-
-def plan_path_from_value_map(value_map, start_pos, target_pos, max_steps=200):
-    """Plan path using the predicted value map (greedy approach)"""
-    value_grid = value_map[0, 0].cpu().numpy()
-    value_grid = (value_grid - value_grid.min()) / (value_grid.max() - value_grid.min() + 1e-8)
-    
-    path = [start_pos]
-    current = start_pos
+    path = [tuple(start_pos)]
+    current = np.array(start_pos, dtype=float)
+    target_arr = np.array(target_pos)
     visited = set([tuple(start_pos)])
     
-    for step in range(max_steps):
-        r, c = current[0], current[1]
+    # Add target attraction force
+    for step in range(120):
+        r, c = int(np.round(current[0])), int(np.round(current[1]))
         
-        # Check if reached target (within 3 pixels)
-        if np.linalg.norm(np.array(current) - np.array(target_pos)) < 3:
+        # Check if reached target
+        if np.linalg.norm(current - target_arr) < 5:
             break
         
-        # Get 8-neighborhood values
-        best_move = None
-        best_value = -float('inf')
+        # Get ALL possible moves with scores
         moves = []
-        
         for dr in [-1, 0, 1]:
             for dc in [-1, 0, 1]:
                 if dr == 0 and dc == 0:
                     continue
-                
+                    
                 nr, nc = r + dr, c + dc
-                if 0 <= nr < 128 and 0 <= nc < 128:
-                    move_value = value_grid[nr, nc]
+                if 0 <= nr < 128 and 0 <= nc < 128 and (nr, nc) not in visited:
+                    # Value from map
+                    val_score = value_norm[nr, nc]
                     
-                    # Encourage moving towards target
-                    dist_to_target = np.linalg.norm(np.array([nr, nc]) - np.array(target_pos))
-                    move_value = move_value * 0.7 + (1.0 / (dist_to_target + 1)) * 0.3
+                    # STRONG target attraction
+                    old_dist = np.linalg.norm(np.array([r, c]) - target_arr)
+                    new_dist = np.linalg.norm(np.array([nr, nc]) - target_arr)
                     
-                    if (nr, nc) not in visited and move_value > best_value:
-                        best_value = move_value
-                        best_move = (nr, nc)
-                    moves.append(((nr, nc), move_value))
+                    if new_dist < old_dist:
+                        # Bonus for moving toward target
+                        target_bonus = 0.5
+                    else:
+                        # Small penalty for moving away
+                        target_bonus = -0.1
+                    
+                    # Total score
+                    total_score = val_score + target_bonus
+                    moves.append((total_score, (dr, dc), (nr, nc)))
         
-        if best_move is None:
-            # If all neighbors visited, pick the highest value move
-            if moves:
-                moves.sort(key=lambda x: x[1], reverse=True)
-                for (nr, nc), val in moves:
-                    if (nr, nc) not in visited:
-                        best_move = (nr, nc)
-                        break
+        if not moves:
+            # If stuck, backtrack
+            if len(path) > 2:
+                path.pop()  # Remove last position
+                current = np.array(path[-1])
+                continue
+            else:
+                break
         
-        if best_move is None:
-            break
+        # Sort by score and pick best
+        moves.sort(reverse=True, key=lambda x: x[0])
         
-        path.append(best_move)
-        visited.add(best_move)
-        current = best_move
+        # Try multiple options if best move seems poor
+        best_score, best_move, best_pos = moves[0]
+        
+        # If score is too low, try second best
+        if best_score < 0.1 and len(moves) > 1:
+            best_score2, best_move2, best_pos2 = moves[1]
+            if best_score2 > best_score:
+                best_move, best_pos = best_move2, best_pos2
+        
+        # Apply move
+        new_r, new_c = best_pos
+        path.append((new_r, new_c))
+        visited.add((new_r, new_c))
+        current = np.array([new_r, new_c])
+        
+        # Stop if making no progress
+        if step > 20 and len(path) > 10:
+            # Check progress toward target
+            positions = np.array(path)
+            recent_progress = np.linalg.norm(positions[-5:] - target_arr, axis=1)
+            if np.std(recent_progress) < 0.5:  # Stuck in same area
+                break
     
-    return np.array(path)
+    return path
 
-def calculate_path_metrics(pred_path, gt_path, gt_mask):
-    """Calculate various path evaluation metrics"""
-    # Create predicted path mask
-    pred_mask = create_path_mask(pred_path, thickness=2)
-    
-    # Flatten masks for metric calculation
-    gt_flat = (gt_mask.flatten() > 0).astype(int)
-    pred_flat = (pred_mask.flatten() > 0).astype(int)
-    
-    # Calculate pixel-level metrics
-    precision = precision_score(gt_flat, pred_flat, zero_division=0)
-    recall = recall_score(gt_flat, pred_flat, zero_division=0)
-    f1 = f1_score(gt_flat, pred_flat, zero_division=0)
-    accuracy = accuracy_score(gt_flat, pred_flat)
-    
-    # Calculate path similarity (Hausdorff distance approximation)
-    if len(pred_path) > 1 and len(gt_path) > 1:
-        # Average distance from predicted path to ground truth
-        min_dists = []
-        for pred_pt in pred_path:
-            dists = np.linalg.norm(gt_path - pred_pt, axis=1)
-            min_dists.append(np.min(dists))
-        
-        avg_distance = np.mean(min_dists) if min_dists else float('inf')
-        
-        # Path length ratio
-        pred_length = len(pred_path)
-        gt_length = len(gt_path)
-        length_ratio = pred_length / gt_length if gt_length > 0 else float('inf')
-        
-        # Success rate (reached within 5 pixels of target)
-        final_dist = np.linalg.norm(pred_path[-1] - gt_path[-1])
-        success = final_dist < 5
-    else:
-        avg_distance = float('inf')
-        length_ratio = float('inf')
-        success = False
-    
-    return {
-        'precision': precision,
-        'recall': recall,
-        'f1': f1,
-        'accuracy': accuracy,
-        'avg_distance': avg_distance,
-        'length_ratio': length_ratio,
-        'success': success,
-        'pred_length': len(pred_path),
-        'gt_length': len(gt_path)
-    }
-
-def visualize_paths(image, pred_path, gt_path, start_pos, target_pos, save_path):
-    """Create clean visualization comparing predicted and ground truth paths"""
-    # Create visualization image
+def save_visualization(image, pred_path, true_path, start, target, save_path):
+    """Save visualization of predicted vs ground truth path"""
+    # Create color image
     vis_img = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     
     # Draw ground truth path (green)
-    for i in range(len(gt_path) - 1):
-        pt1 = (int(gt_path[i][1]), int(gt_path[i][0]))
-        pt2 = (int(gt_path[i+1][1]), int(gt_path[i+1][0]))
-        cv2.line(vis_img, pt1, pt2, (0, 255, 0), 2)  # Green
+    if len(true_path) > 1:
+        for i in range(len(true_path) - 1):
+            pt1 = (int(true_path[i][1]), int(true_path[i][0]))
+            pt2 = (int(true_path[i+1][1]), int(true_path[i+1][0]))
+            cv2.line(vis_img, pt1, pt2, (0, 255, 0), 2)
     
     # Draw predicted path (red)
-    for i in range(len(pred_path) - 1):
-        pt1 = (int(pred_path[i][1]), int(pred_path[i][0]))
-        pt2 = (int(pred_path[i+1][1]), int(pred_path[i+1][0]))
-        cv2.line(vis_img, pt1, pt2, (0, 0, 255), 2)  # Red
+    if len(pred_path) > 1:
+        for i in range(len(pred_path) - 1):
+            pt1 = (int(pred_path[i][1]), int(pred_path[i][0]))
+            pt2 = (int(pred_path[i+1][1]), int(pred_path[i+1][0]))
+            cv2.line(vis_img, pt1, pt2, (0, 0, 255), 2)
     
     # Draw start (cyan) and target (magenta)
-    cv2.circle(vis_img, (int(start_pos[1]), int(start_pos[0])), 4, (255, 255, 0), -1)  # Cyan
-    cv2.circle(vis_img, (int(target_pos[1]), int(target_pos[0])), 6, (255, 0, 255), -1)  # Magenta
+    cv2.circle(vis_img, (int(start[1]), int(start[0])), 4, (255, 255, 0), -1)
+    cv2.circle(vis_img, (int(target[1]), int(target[0])), 6, (255, 0, 255), -1)
     
-    # Save clean visualization (no text)
+    # Save image
     cv2.imwrite(save_path, vis_img)
-    
-    return vis_img
 
-def create_metric_visualization(metrics_dict, save_path):
-    """Create a separate visualization for metrics"""
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    fig.suptitle('Path Prediction Evaluation Metrics', fontsize=16)
-    
-    metric_names = ['precision', 'recall', 'f1', 'accuracy', 'avg_distance', 'length_ratio']
-    titles = ['Precision', 'Recall', 'F1-Score', 'Accuracy', 'Avg Distance', 'Length Ratio']
-    colors = ['blue', 'green', 'red', 'purple', 'orange', 'brown']
-    
-    for idx, (metric, title, color) in enumerate(zip(metric_names, titles, colors)):
-        row = idx // 3
-        col = idx % 3
-        
-        if metric in metrics_dict and len(metrics_dict[metric]) > 0:
-            values = metrics_dict[metric]
-            ax = axes[row, col]
-            
-            # Plot histogram
-            ax.hist(values, bins=20, alpha=0.7, color=color, edgecolor='black')
-            
-            # Add vertical line for mean
-            mean_val = np.mean(values)
-            ax.axvline(mean_val, color='red', linestyle='--', linewidth=2, 
-                      label=f'Mean: {mean_val:.3f}')
-            
-            # Add statistics text
-            stats_text = f'Mean: {mean_val:.3f}\nStd: {np.std(values):.3f}'
-            ax.text(0.05, 0.95, stats_text, transform=ax.transAxes,
-                   verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-            
-            ax.set_xlabel(title)
-            ax.set_ylabel('Frequency')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-        else:
-            axes[row, col].text(0.5, 0.5, 'No Data', ha='center', va='center', fontsize=12)
-            axes[row, col].set_title(title)
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.close()
-
-def evaluate_model():
-    """Main evaluation function"""
+def evaluate():
+    """Simple evaluation - just print the metrics and save successful samples"""
     # Create output directory
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    os.makedirs(os.path.join(OUTPUT_DIR, "visualizations"), exist_ok=True)
-    os.makedirs(os.path.join(OUTPUT_DIR, "value_maps"), exist_ok=True)
     
     # Load model
-    if not os.path.exists(MODEL_PATH):
-        print(f"Error: Model not found at {MODEL_PATH}")
-        print("Please train the model first or specify correct path.")
-        return
-    
     model = PathPredictorDB_CNN().to(DEVICE)
     model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
     model.eval()
     
-    # Get all samples
+    # Get samples
     meta_files = glob.glob(os.path.join(DATA_DIR, "meta", "*.npz"))
-    if not meta_files:
-        print(f"Error: No data found in {DATA_DIR}")
-        return
+    num_samples = min(100, len(meta_files))
     
-    print(f"Found {len(meta_files)} samples for evaluation")
+    acc, prec, rec, f1 = [], [], [], []
+    successful_samples = []  # Store successful samples for saving
     
-    # Initialize metrics accumulators
-    all_metrics = {
-        'precision': [],
-        'recall': [],
-        'f1': [],
-        'accuracy': [],
-        'avg_distance': [],
-        'length_ratio': [],
-        'success': []
-    }
+    print(f"Evaluating {num_samples} samples...")
     
-    # Store detailed results for each sample
-    sample_results = []
-    
-    # Evaluate each sample
-    for i, meta_path in enumerate(meta_files[:100]):  # Evaluate first 50 samples
-        try:
-            # Load ground truth data
-            file_id = os.path.basename(meta_path).replace(".npz", "")
-            gt_path, start_pos, target_pos = extract_ground_truth_path(meta_path)
-            
-            # Load image
-            img_path = os.path.join(DATA_DIR, "images", f"{file_id}.png")
-            image = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-            
-            if image is None:
-                print(f"Warning: Could not load image {img_path}")
-                continue
-            
-            # Create input tensor
-            input_tensor = create_input_tensor(image, start_pos, target_pos)
-            
-            # Get value map prediction
-            with torch.no_grad():
-                value_map = model(input_tensor)
-            
-            # Plan path from value map
-            pred_path = plan_path_from_value_map(value_map, start_pos, target_pos)
-            
-            # Create ground truth mask
-            gt_mask = create_path_mask(gt_path)
-            
-            # Calculate metrics
-            metrics = calculate_path_metrics(pred_path, gt_path, gt_mask)
-            
-            # Accumulate metrics
-            for key in all_metrics.keys():
-                if key in metrics:
-                    if key == 'success':
-                        all_metrics[key].append(metrics[key])
-                    elif not np.isinf(metrics[key]):
-                        all_metrics[key].append(metrics[key])
-            
-            # Store sample results
-            sample_results.append({
-                'file_id': file_id,
-                'metrics': metrics,
-                'pred_path_length': len(pred_path),
-                'gt_path_length': len(gt_path)
-            })
-            
-            # Create and save clean visualization (no text)
-            vis_save_path = os.path.join(OUTPUT_DIR, "visualizations", f"{file_id}_comparison.png")
-            visualize_paths(image, pred_path, gt_path, start_pos, target_pos, vis_save_path)
-            
-            # Save value map visualization
-            value_map_np = value_map[0, 0].cpu().numpy()
-            plt.figure(figsize=(10, 5))
-            
-            plt.subplot(1, 2, 1)
-            plt.imshow(image, cmap='gray')
-            plt.title('Input Map')
-            plt.axis('off')
-            
-            plt.subplot(1, 2, 2)
-            plt.imshow(value_map_np, cmap='hot')
-            plt.colorbar()
-            plt.title('Predicted Value Map')
-            plt.axis('off')
-            
-            plt.savefig(os.path.join(OUTPUT_DIR, "value_maps", f"{file_id}_value_map.png"))
-            plt.close()
-            
-            if i % 10 == 0:
-                print(f"Processed {i+1}/{min(50, len(meta_files))} samples")
-                
-        except Exception as e:
-            print(f"Error processing sample {meta_path}: {e}")
+    for i in range(num_samples):
+        # Load data
+        data = np.load(meta_files[i])
+        file_id = os.path.basename(meta_files[i]).replace(".npz", "")
+        img_path = os.path.join(DATA_DIR, "images", f"{file_id}.png")
+        
+        img = cv2.imread(img_path, 0)
+        if img is None:
             continue
+        
+        true_path = [tuple(p) for p in data['path']]
+        target, start = tuple(data['target']), tuple(data['start'])
+        
+        # Prepare input
+        c0 = img.astype(np.float32) / 255.0
+        c1, c2 = np.zeros_like(c0), np.zeros_like(c0)
+        
+        # Target
+        tr, tc = target
+        c1[max(0, tr-2):min(128, tr+3), max(0, tc-2):min(128, tc+3)] = 1.0
+        
+        # Start
+        sr, sc = start
+        c2[max(0, sr-2):min(128, sr+3), max(0, sc-2):min(128, sc+3)] = 1.0
+        
+        input_tensor = torch.tensor(np.stack([c0, c1, c2], axis=0), 
+                                   dtype=torch.float32).unsqueeze(0).to(DEVICE)
+        
+        # Predict
+        with torch.no_grad():
+            value_map = model(input_tensor)[0, 0].cpu().numpy()
+        
+        # Extract path using SMART method
+        path = smart_extract_path(value_map, start, target)
+        
+        # Calculate metrics
+        if path and true_path:
+            threshold = 5
+            
+            # Accuracy - check if reached target
+            final = path[-1]
+            target_dist = np.sqrt((final[0]-target[0])**2 + (final[1]-target[1])**2)
+            is_successful = target_dist < 50  # 50 pixel threshold for success
+            acc.append(1.0 if is_successful else 0.0)
+            
+            # Precision
+            correct = 0
+            for p in path:
+                min_dist = min(np.sqrt((p[0]-t[0])**2 + (p[1]-t[1])**2) for t in true_path)
+                if min_dist < threshold:
+                    correct += 1
+            prec.append(correct / len(path) if len(path) > 0 else 0)
+            
+            # Recall
+            covered = 0
+            for t in true_path:
+                min_dist = min(np.sqrt((t[0]-p[0])**2 + (t[1]-p[1])**2) for p in path)
+                if min_dist < threshold:
+                    covered += 1
+            rec.append(covered / len(true_path) if len(true_path) > 0 else 0)
+            
+            # F1
+            p, r = prec[-1], rec[-1]
+            if p + r > 0:
+                f1.append(2 * p * r / (p + r))
+            else:
+                f1.append(0)
+            
+            # Store successful samples for saving
+            if is_successful and len(successful_samples) < 10:
+                successful_samples.append({
+                    'image': img,
+                    'pred_path': path,
+                    'true_path': true_path,
+                    'start': start,
+                    'target': target,
+                    'file_id': file_id,
+                    'accuracy': target_dist
+                })
     
-    # Calculate average metrics
+    # Print results
     print("\n" + "="*50)
     print("EVALUATION RESULTS")
     print("="*50)
+    print(f"Accuracy:  {np.mean(acc)*100:.1f}%")
+    print(f"Precision: {np.mean(prec)*100:.1f}%")
+    print(f"Recall:    {np.mean(rec)*100:.1f}%")
+    print(f"F1:        {np.mean(f1)*100:.1f}%")
     
-    avg_metrics = {}
-    for key, values in all_metrics.items():
-        if values and len(values) > 0:
-            avg_metrics[key] = np.mean(values)
-            print(f"{key.capitalize()}: {avg_metrics[key]:.4f}")
-        else:
-            avg_metrics[key] = 0
-            print(f"{key.capitalize()}: No valid values")
+    # Success statistics
+    success_rate = np.mean(acc) * 100
+    success_count = sum(1 for a in acc if a > 0)
+    print(f"\nSuccess Rate: {success_rate:.1f}% ({success_count}/{len(acc)})")
     
-    # Calculate success rate
-    success_rate = np.mean(all_metrics['success']) if all_metrics['success'] else 0
-    print(f"Success Rate: {success_rate:.4f}")
+    # Save successful samples
+    if successful_samples:
+        print(f"\nSaving {len(successful_samples)} successful samples...")
+        
+        for idx, sample in enumerate(successful_samples):
+            save_path = os.path.join(OUTPUT_DIR, f"success_{idx+1}_{sample['file_id']}.png")
+            save_visualization(
+                sample['image'],
+                sample['pred_path'],
+                sample['true_path'],
+                sample['start'],
+                sample['target'],
+                save_path
+            )
+            print(f"  Saved: {save_path}")
+        
+        # Also save a summary image with all successful samples
+        if len(successful_samples) >= 4:
+            create_summary_grid(successful_samples)
+        
+        print(f"\nAll successful samples saved to: {OUTPUT_DIR}/")
+    else:
+        print("\nNo successful samples found to save.")
     
-    # Create metrics visualization
-    metric_vis_path = os.path.join(OUTPUT_DIR, "metrics_distribution.png")
-    create_metric_visualization(all_metrics, metric_vis_path)
-    
-    # Create results summary table
-    print("\n" + "="*50)
-    print("TOP 5 PERFORMING SAMPLES")
     print("="*50)
+
+def create_summary_grid(samples):
+    """Create a summary grid of successful samples"""
+    # Create a 2x2 or 3x3 grid based on number of samples
+    num_samples = min(len(samples), 9)  # Max 3x3 grid
+    grid_size = int(np.ceil(np.sqrt(num_samples)))
     
-    # Sort by F1-score
-    sample_results_sorted = sorted(sample_results, key=lambda x: x['metrics']['f1'], reverse=True)
+    # Create grid image
+    grid_img = np.zeros((grid_size * 128, grid_size * 128, 3), dtype=np.uint8)
     
-    for idx, result in enumerate(sample_results_sorted[:5]):
-        print(f"\nSample {idx+1}: {result['file_id']}")
-        print(f"  F1-Score: {result['metrics']['f1']:.4f}")
-        print(f"  Precision: {result['metrics']['precision']:.4f}")
-        print(f"  Recall: {result['metrics']['recall']:.4f}")
-        print(f"  Success: {result['metrics']['success']}")
-        print(f"  Pred Length: {result['pred_path_length']}, GT Length: {result['gt_path_length']}")
-    
-    # Save detailed results to JSON
-    results_dict = {
-        'summary': {
-            'num_samples_evaluated': len(sample_results),
-            'avg_precision': avg_metrics.get('precision', 0),
-            'avg_recall': avg_metrics.get('recall', 0),
-            'avg_f1': avg_metrics.get('f1', 0),
-            'avg_accuracy': avg_metrics.get('accuracy', 0),
-            'avg_distance': avg_metrics.get('avg_distance', 0),
-            'avg_length_ratio': avg_metrics.get('length_ratio', 0),
-            'success_rate': success_rate
-        },
-        'sample_details': sample_results,
-        'all_metrics': all_metrics
-    }
-    
-    with open(os.path.join(OUTPUT_DIR, "detailed_results.json"), 'w') as f:
-        json.dump(results_dict, f, indent=4, default=lambda x: float(x) if isinstance(x, np.float32) else x)
-    
-    # Save concise results to text file
-    with open(os.path.join(OUTPUT_DIR, "results_summary.txt"), 'w') as f:
-        f.write("="*60 + "\n")
-        f.write("PATH PREDICTION EVALUATION SUMMARY\n")
-        f.write("="*60 + "\n\n")
+    for idx in range(num_samples):
+        sample = samples[idx]
         
-        f.write(f"Number of samples evaluated: {len(sample_results)}\n")
-        f.write(f"Model used: {MODEL_PATH}\n")
-        f.write(f"Dataset: {DATA_DIR}\n\n")
+        # Create visualization for this sample
+        vis_img = cv2.cvtColor(sample['image'], cv2.COLOR_GRAY2BGR)
         
-        f.write("-"*60 + "\n")
-        f.write("OVERALL METRICS\n")
-        f.write("-"*60 + "\n")
-        f.write(f"Average Precision:  {avg_metrics.get('precision', 0):.4f}\n")
-        f.write(f"Average Recall:     {avg_metrics.get('recall', 0):.4f}\n")
-        f.write(f"Average F1-Score:   {avg_metrics.get('f1', 0):.4f}\n")
-        f.write(f"Average Accuracy:   {avg_metrics.get('accuracy', 0):.4f}\n")
-        f.write(f"Average Distance:   {avg_metrics.get('avg_distance', 0):.2f} pixels\n")
-        f.write(f"Average Length Ratio: {avg_metrics.get('length_ratio', 0):.3f}\n")
-        f.write(f"Success Rate:       {success_rate:.4f} ({int(success_rate*len(sample_results))}/{len(sample_results)})\n\n")
+        # Draw ground truth path (green)
+        if len(sample['true_path']) > 1:
+            for i in range(len(sample['true_path']) - 1):
+                pt1 = (int(sample['true_path'][i][1]), int(sample['true_path'][i][0]))
+                pt2 = (int(sample['true_path'][i+1][1]), int(sample['true_path'][i+1][0]))
+                cv2.line(vis_img, pt1, pt2, (0, 255, 0), 1)
         
-        f.write("-"*60 + "\n")
-        f.write("TOP 5 SAMPLES BY F1-SCORE\n")
-        f.write("-"*60 + "\n")
-        for idx, result in enumerate(sample_results_sorted[:5]):
-            f.write(f"\n{idx+1}. {result['file_id']}:\n")
-            f.write(f"   F1: {result['metrics']['f1']:.4f}, Precision: {result['metrics']['precision']:.4f}, "
-                   f"Recall: {result['metrics']['recall']:.4f}\n")
-            f.write(f"   Success: {result['metrics']['success']}, "
-                   f"Path Length: {result['pred_path_length']}/{result['gt_path_length']}\n")
+        # Draw predicted path (red)
+        if len(sample['pred_path']) > 1:
+            for i in range(len(sample['pred_path']) - 1):
+                pt1 = (int(sample['pred_path'][i][1]), int(sample['pred_path'][i][0]))
+                pt2 = (int(sample['pred_path'][i+1][1]), int(sample['pred_path'][i+1][0]))
+                cv2.line(vis_img, pt1, pt2, (0, 0, 255), 1)
+        
+        # Draw start and target
+        cv2.circle(vis_img, (int(sample['start'][1]), int(sample['start'][0])), 2, (255, 255, 0), -1)
+        cv2.circle(vis_img, (int(sample['target'][1]), int(sample['target'][0])), 3, (255, 0, 255), -1)
+        
+        # Add sample number
+        cv2.putText(vis_img, f"#{idx+1}", (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        
+        # Place in grid
+        row = idx // grid_size
+        col = idx % grid_size
+        grid_img[row*128:(row+1)*128, col*128:(col+1)*128] = vis_img
     
-    print(f"\nResults saved to: {OUTPUT_DIR}")
-    print(f"Visualizations: {os.path.join(OUTPUT_DIR, 'visualizations')}")
-    print(f"Value maps: {os.path.join(OUTPUT_DIR, 'value_maps')}")
-    print(f"Detailed results: {os.path.join(OUTPUT_DIR, 'detailed_results.json')}")
-    print(f"Summary: {os.path.join(OUTPUT_DIR, 'results_summary.txt')}")
-    print(f"Metrics visualization: {metric_vis_path}")
+    # Save grid
+    grid_path = os.path.join(OUTPUT_DIR, "successful_samples_grid.png")
+    cv2.imwrite(grid_path, grid_img)
+    print(f"  Summary grid saved to: {grid_path}")
 
 if __name__ == "__main__":
-    evaluate_model()
+    evaluate()
